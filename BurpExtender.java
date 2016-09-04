@@ -1,10 +1,15 @@
 package burp;
 
 import java.net.URL;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
+import java.net.MalformedURLException;
 import java.util.ArrayList;
 import java.util.List;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
+import org.jsoup.nodes.Element;
+import org.jsoup.select.Elements;
 
 public class BurpExtender implements IBurpExtender, IScannerCheck
 {
@@ -30,14 +35,23 @@ public class BurpExtender implements IBurpExtender, IScannerCheck
         // register ourselves as a custom scanner check
         callbacks.registerScannerCheck(this);
     }
-   
-    // method to scan a HTTP responses for script includes that 
-    // do not resolve properly.
-    private boolean scanForNXDomains(String httpResponse)
-    {
 
-	Document doc = Jsoup.parse(httpResponse);
-	return true;	
+    //doesNXDomain is a helper function that extracts
+    //a domain name from a JavaScript include URL
+    //and returns true if that domain name is not currently
+    //registered to an IP address.
+    private boolean doesNXDomain(String scriptSource)
+    {
+	try {
+		URL url = new URL(scriptSource);
+		InetAddress.getByName(url.getHost());
+		return false;
+	} catch(UnknownHostException ex) {
+		return true;
+	} catch(MalformedURLException ex) {
+		return false;
+	}
+
     }
 
     //
@@ -51,18 +65,41 @@ public class BurpExtender implements IBurpExtender, IScannerCheck
     	byte[] responseBytes = baseRequestResponse.getResponse();	    
 	IResponseInfo responseInfo = helpers.analyzeResponse(responseBytes);
 	int offset = responseInfo.getBodyOffset();
-	String responseBody = new String(responseBytes).substring(offset, responseBytes.length);
-	
-    	List<IScanIssue> issues = new ArrayList<>(1);
-        issues.add(new CustomScanIssue(
-                baseRequestResponse.getHttpService(),
-                helpers.analyzeRequest(baseRequestResponse).getUrl(), 
-		//TODO(kkl): Offset markers for the affected scripts.
-                new IHttpRequestResponse[] { callbacks.applyMarkers(baseRequestResponse, null, null) }, 
-                "pwnx stuff",
-                "pwnx stuff again",
-                "Information"));
-        return issues;
+	String httpBody = new String(responseBytes).substring(offset);
+	Document doc = Jsoup.parse(httpBody);
+	Elements elems = doc.select("script");
+
+	if (elems.isEmpty()) {
+		return null;
+	} 
+
+	List<IScanIssue> issues = new ArrayList<>();
+	for (Element elem : elems) {
+
+		if (elem.hasAttr("src")) {
+
+			String scriptSource = elem.attr("src");
+
+			if (scriptSource.charAt(0) == '/') {
+				continue;
+			} 
+
+			if (doesNXDomain(scriptSource)) {
+				int start = httpBody.indexOf(scriptSource) + offset;
+				int end = start + scriptSource.length();
+				List<int[]> markers = new ArrayList<int[]>();
+				markers.add(new int[] { start, end });
+        			issues.add(new CustomScanIssue(
+        			        baseRequestResponse.getHttpService(),
+        			        helpers.analyzeRequest(baseRequestResponse).getUrl(), 
+					new IHttpRequestResponse[] { callbacks.applyMarkers(baseRequestResponse, null, markers) }, 
+        			        "Included JavaScript from NX Domain",
+					"NX Domain for loaded JavaScript file: " + scriptSource,
+        			        "High"));
+			}
+		}
+	} 
+	return issues;
     }
 
     @Override
@@ -74,7 +111,7 @@ public class BurpExtender implements IBurpExtender, IScannerCheck
     @Override
     public int consolidateDuplicateIssues(IScanIssue existingIssue, IScanIssue newIssue)
     {
-	//TODO(kkl): filter out duplicate domains here.
+	//NOTE(kkl): Uncertain if I want to filter duplicate issues. I feel it may lead to false negatives.
 	return 0;
     }
 }
@@ -140,7 +177,10 @@ class CustomScanIssue implements IScanIssue
     @Override
     public String getIssueBackground()
     {
-        return null;
+        return "The application is loading JavaScript into its origin " + 
+		"from a unresolvable domain. It is possible that this " + 
+		"domain could be registered by an attacker and used to" + 
+		" host malicous JavaScript.";
     }
 
     @Override

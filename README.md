@@ -5,7 +5,7 @@ unresolvable.
 
 ## building
 
-`./BUILD.sh`
+`./JAR.sh`
 
 ## installing
 
